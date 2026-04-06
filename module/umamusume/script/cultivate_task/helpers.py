@@ -9,10 +9,11 @@ from module.umamusume.constants.game_constants import is_summer_camp_period
 
 log = logger.get_logger(__name__)
 
-TRAINING_REPLACEMENT_DATES_ORDER = (7, 5, 1, 4, 3)
-TRAINING_REPLACEMENT_DATES = set(TRAINING_REPLACEMENT_DATES_ORDER)
+TRAINING_REPLACEMENT_DATES = {7, 5, 1, 4, 3}
 REST_REPLACEMENT_DATES = {2, 6, 7}
 RECREATION_REPLACEMENT_DATES = {3}
+RECREATION_DATE_ORDER = [7, 5, 1, 4, 3, 2, 6]
+PRIORITY_DATES = REST_REPLACEMENT_DATES
 
 ts_cancel_tpl = None
 
@@ -126,8 +127,7 @@ def get_team_sirius_recreation_date(ctx: UmamusumeContext) -> int:
     available = getattr(ctx.cultivate_detail, 'team_sirius_available_dates', [])
     if not available:
         return 0
-    all_ts_priority = list(TRAINING_REPLACEMENT_DATES_ORDER) + [d for d in REST_REPLACEMENT_DATES if d not in TRAINING_REPLACEMENT_DATES_ORDER] + [d for d in RECREATION_REPLACEMENT_DATES if d not in TRAINING_REPLACEMENT_DATES_ORDER]
-    for date in all_ts_priority:
+    for date in RECREATION_DATE_ORDER:
         if date in available:
             return date
     return 0
@@ -182,40 +182,35 @@ def execute_team_sirius_recreation(ctx: UmamusumeContext, trip_click_point=None)
 
 
 def execute_regular_recreation(ctx: UmamusumeContext, trip_click_point=None) -> bool:
-    ts_dates = getattr(ctx.cultivate_detail, 'team_sirius_available_dates', [])
-    if not ts_dates:
-        return False
-
     from module.umamusume.asset.point import CULTIVATE_OPERATION_COMMON_CONFIRM, ESCAPE
-
     if trip_click_point:
         ctx.ctrl.click_by_point(trip_click_point)
     else:
         from module.umamusume.asset.point import CULTIVATE_TRIP_MANT
         ctx.ctrl.click_by_point(CULTIVATE_TRIP_MANT)
-    time.sleep(0.5)
-    if not ts_wait_cancel(ctx, *TS_RECREATION_CANCEL, timeout=3.2):
+    time.sleep(0.3)
+    if not ts_wait_cancel(ctx, *TS_RECREATION_CANCEL, timeout=2.0):
         ctx.ctrl.click_by_point(ESCAPE)
-        if not ts_wait_cancel(ctx, *TS_RECREATION_CANCEL, timeout=2.0):
+        if not ts_wait_cancel(ctx, *TS_RECREATION_CANCEL, timeout=1.5):
             return False
     ctx.ctrl.click_by_point(CULTIVATE_OPERATION_COMMON_CONFIRM)
     time.sleep(0.5)
-
-    date_slot = get_team_sirius_recreation_date(ctx)
-    if date_slot == 0:
-        ctx.ctrl.click_by_point(ESCAPE)
-        return False
-
-    ctx.ctrl.click(*TS_CLICK)
-    time.sleep(0.3)
-    if ts_wait_cancel(ctx, *TS_MENU_CANCEL, timeout=3.2):
-        click_y = TS_DATE_CLICK_Y[date_slot - 1]
-        ctx.ctrl.click(TS_DATE_CLICK_X, click_y)
+    ts_dates = getattr(ctx.cultivate_detail, 'team_sirius_available_dates', [])
+    if 3 in ts_dates:
+        ctx.ctrl.click(*TS_CLICK)
         time.sleep(0.3)
+        if ts_wait_cancel(ctx, *TS_MENU_CANCEL, timeout=2.0):
+            ctx.ctrl.click(TS_DATE_CLICK_X, TS_DATE_CLICK_Y[2])
+            time.sleep(0.3)
+            ctx.ctrl.click_by_point(CULTIVATE_OPERATION_COMMON_CONFIRM)
+            time.sleep(0.5)
+        else:
+            ctx.ctrl.click_by_point(ESCAPE)
     else:
-        ctx.ctrl.click_by_point(ESCAPE)
-        return False
-
+        ctx.ctrl.click(329, 604)
+        time.sleep(0.5)
+        ctx.ctrl.click_by_point(CULTIVATE_OPERATION_COMMON_CONFIRM)
+        time.sleep(0.5)
     import random
     for _ in range(10):
         if is_menu(ctx):

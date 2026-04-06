@@ -1,5 +1,6 @@
 import cv2
 import re
+import time
 
 from bot.recog.image_matcher import image_match
 from bot.recog.ocr import ocr_line
@@ -105,6 +106,8 @@ def handle_mant_turn_start(ctx, current_date):
 
 def handle_mant_shop_scan(ctx, current_date):
     if ctx.cultivate_detail.mant_shop_scanned_this_turn:
+        return False
+    if getattr(ctx.cultivate_detail, 'mant_shop_handled_this_turn', False):
         return False
     from module.umamusume.scenario.mant.shop import (
         is_shop_scan_turn, scan_mant_shop, buy_shop_items,
@@ -327,6 +330,7 @@ def handle_mant_shop_scan(ctx, current_date):
                     budget -= cost
 
         targets = priority_targets + tier_targets
+        log.info(f"Shop purchase targets: {targets} (budget={budget})")
         if targets:
             bought, held_items = buy_shop_items(ctx, targets, items_list, ratio, drag_ratio, first_item_gy)
             if bought:
@@ -342,17 +346,82 @@ def handle_mant_shop_scan(ctx, current_date):
                              if buyable and name not in bought_set]
                 log_detected_shop_items(remaining)
 
+                # --- Post-purchase verification (Solution 1) ---
+                # Items that are used instantly after purchase (not tracked in inventory)
+                INSTANT_USE_ITEMS = {
+                    'Speed Scroll', 'Stamina Scroll', 'Power Scroll', 'Guts Scroll', 'Wit Scroll',
+                    'Speed Training Application', 'Stamina Training Application',
+                    'Power Training Application', 'Guts Training Application', 'Wit Training Application',
+                }
+                
+                # Get current inventory
+                owned = getattr(ctx.cultivate_detail, 'mant_owned_items', [])
+                owned_map = {n: q for n, q in owned}
+                
+                # Check which non-instant-use items were planned but aren't in inventory
+                verify_targets = [t for t in targets if t not in INSTANT_USE_ITEMS]
+                missing_items = []
+                for item_name in verify_targets:
+                    if owned_map.get(item_name, 0) <= 0:
+                        missing_items.append(item_name)
+                
+                if missing_items:
+                    log.warning(f"Post-purchase check: missing items {missing_items} - retrying shop purchase")
+                    # Force rescan inventory to get latest state
+                    from module.umamusume.scenario.mant.inventory import open_items_panel, close_items_panel
+                    from module.umamusume.context import log_detected_items
+                    
+                    opened = open_items_panel(ctx)
+                    if opened:
+                        from module.umamusume.scenario.mant.inventory import scan_inventory
+                        owned = scan_inventory(ctx)
+                        ctx.cultivate_detail.mant_owned_items = owned
+                        ctx.cultivate_detail.mant_inventory_scanned = True
+                        log_detected_items(owned)
+                        close_items_panel(ctx)
+                        
+                        # Re-check with fresh inventory
+                        owned_map = {n: q for n, q in owned}
+                        missing_items = [t for t in verify_targets if owned_map.get(t, 0) <= 0]
+                        
+                        if missing_items:
+                            log.info(f"Retry: attempting to purchase {missing_items}")
+                            # Rescan shop and retry purchase
+                            from module.umamusume.scenario.mant.shop import scan_mant_shop
+                            scan_result = scan_mant_shop(ctx)
+                            if scan_result is not None:
+                                retry_items, retry_ratio, retry_drag_ratio, retry_first_gy = scan_result
+                                retry_bought, _ = buy_shop_items(ctx, missing_items, retry_items, retry_ratio, retry_drag_ratio, retry_first_gy)
+                                if retry_bought:
+                                    log.info(f"Retry successful: purchased {missing_items}")
+                                    ctx.cultivate_detail.mant_inventory_rescan_pending = True
+                                    total_spent_retry = sum(SHOP_ITEM_COSTS.get(t, 0) for t in missing_items)
+                                    ctx.cultivate_detail.mant_coins = max(0, ctx.cultivate_detail.mant_coins - total_spent_retry)
+                                else:
+                                    log.warning(f"Retry failed: could not purchase {missing_items} - continuing anyway")
+                            else:
+                                log.warning(f"Retry: shop scan failed - continuing anyway")
+                        else:
+                            log.info(f"Post-purchase check: items found in inventory after all")
+                    else:
+                        log.warning(f"Post-purchase check: could not open inventory - continuing anyway")
+                else:
+                    log.info("Post-purchase check: all planned items found in inventory")
+
     if not bought:
         from module.umamusume.scenario.mant.shop import BACK_BTN_X, BACK_BTN_Y
         import time as t
         ctx.ctrl.click(BACK_BTN_X, BACK_BTN_Y)
         t.sleep(1)
 
+    ctx.cultivate_detail.mant_shop_handled_this_turn = True
     ctx.cultivate_detail.turn_info.parse_main_menu_finish = False
     return True
 
 
 def handle_mant_emergency_shop_buys(ctx, current_date):
+    if getattr(ctx.cultivate_detail, 'mant_shop_handled_this_turn', False):
+        return False
     if getattr(ctx.cultivate_detail.turn_info, 'mant_emergency_shop_done', False):
         return False
 
@@ -505,6 +574,7 @@ def handle_mant_emergency_shop_buys(ctx, current_date):
     scan_result = scan_mant_shop(ctx)
     if scan_result is None:
         ctx.ctrl.trigger_decision_reset = True
+        ctx.cultivate_detail.mant_shop_handled_this_turn = True
         return True
 
     ctx.cultivate_detail.turn_info.mant_emergency_shop_done = True
@@ -517,6 +587,7 @@ def handle_mant_emergency_shop_buys(ctx, current_date):
     if not final_targets:
         ctx.ctrl.click(BACK_BTN_X, BACK_BTN_Y)
         _t.sleep(1)
+        ctx.cultivate_detail.mant_shop_handled_this_turn = True
         return True
 
     bought, _ = buy_shop_items(ctx, final_targets, items_list, ratio, drag_ratio, first_item_gy)
@@ -538,13 +609,14 @@ def handle_mant_emergency_shop_buys(ctx, current_date):
         ctx.ctrl.click(BACK_BTN_X, BACK_BTN_Y)
         _t.sleep(1)
 
+    ctx.cultivate_detail.mant_shop_handled_this_turn = True
     return True
 
 
 CLIMAX_MASTER_RESERVE = 40
 
 
-def _would_cleat_be_used(cleat_name, race_id, current_date, owned_map):
+def would_cleat_be_used(cleat_name, race_id, current_date, owned_map):
     from module.umamusume.scenario.mant.inventory import MANT_CLIMAX_RACE_TURNS, remaining_climax_races
     from module.umamusume.asset.race_data import is_g1_race
 
@@ -576,6 +648,8 @@ def _would_cleat_be_used(cleat_name, race_id, current_date, owned_map):
 
 
 def handle_mant_cleat_shop_buy(ctx, current_date):
+    if getattr(ctx.cultivate_detail, 'mant_shop_handled_this_turn', False):
+        return False
     from module.umamusume.constants.game_constants import CLASSIC_YEAR_END, SENIOR_YEAR_END
     from module.umamusume.scenario.mant.shop import (
         SHOP_ITEM_COSTS, scan_mant_shop, buy_shop_items, BACK_BTN_X, BACK_BTN_Y
@@ -612,7 +686,7 @@ def handle_mant_cleat_shop_buy(ctx, current_date):
             cost = SHOP_ITEM_COSTS.get(candidate, 9999)
             if cost > budget:
                 continue
-            return _execute_cleat_buy(ctx, candidate, cost)
+            return execute_cleat_buy(ctx, candidate, cost)
         return False
 
 
@@ -629,13 +703,13 @@ def handle_mant_cleat_shop_buy(ctx, current_date):
                 continue
             if total_cleats < 2 and budget - cost < 40:
                 continue
-            return _execute_cleat_buy(ctx, candidate, cost)
+            return execute_cleat_buy(ctx, candidate, cost)
         return False
 
     return False
 
 
-def _execute_cleat_buy(ctx, cleat_name, cost):
+def execute_cleat_buy(ctx, cleat_name, cost):
     from module.umamusume.scenario.mant.shop import (
         scan_mant_shop, buy_shop_items, BACK_BTN_X, BACK_BTN_Y
     )
@@ -644,6 +718,7 @@ def _execute_cleat_buy(ctx, cleat_name, cost):
     scan_result = scan_mant_shop(ctx)
     if scan_result is None:
         ctx.ctrl.trigger_decision_reset = True
+        ctx.cultivate_detail.mant_shop_handled_this_turn = True
         return True
 
     ctx.cultivate_detail.turn_info.mant_cleat_shop_done = True
@@ -654,6 +729,7 @@ def _execute_cleat_buy(ctx, cleat_name, cost):
     if cleat_name not in fresh_available:
         ctx.ctrl.click(BACK_BTN_X, BACK_BTN_Y)
         _t.sleep(1)
+        ctx.cultivate_detail.mant_shop_handled_this_turn = True
         return True
 
     bought, _ = buy_shop_items(ctx, [cleat_name], items_list, ratio, drag_ratio, first_item_gy)
@@ -675,6 +751,7 @@ def _execute_cleat_buy(ctx, cleat_name, cost):
         ctx.ctrl.click(BACK_BTN_X, BACK_BTN_Y)
         _t.sleep(1)
 
+    ctx.cultivate_detail.mant_shop_handled_this_turn = True
     return True
 
 
@@ -693,7 +770,6 @@ def handle_mant_main_menu(ctx, img, current_date):
     if has_instant_use_items(ctx):
         handle_instant_use_items(ctx)
         ctx.cultivate_detail.turn_info.parse_main_menu_finish = False
-        return True
 
     if not getattr(ctx.cultivate_detail.turn_info, 'mant_cupcake_checked', False):
         ctx.cultivate_detail.turn_info.mant_cupcake_checked = True
@@ -800,6 +876,14 @@ def color_match(px, target, tol):
             abs(int(px[2]) - target[2]) <= tol)
 
 
+def is_late_dec_date(date_id):
+    """Check if the date corresponds to Late December (year-end)."""
+    from module.umamusume.constants.game_constants import (
+        JUNIOR_YEAR_END, CLASSIC_YEAR_END, SENIOR_YEAR_END
+    )
+    return date_id in (JUNIOR_YEAR_END, CLASSIC_YEAR_END, SENIOR_YEAR_END)
+
+
 def handle_mant_rival_race(ctx, img):
     if getattr(ctx.cultivate_detail.turn_info, 'mant_rival_checked', False):
         return
@@ -810,6 +894,60 @@ def handle_mant_rival_race(ctx, img):
     px = img_rgb[1089, rival_x]
     if color_match(px, RIVAL_COLOR_1, RIVAL_TOLERANCE) or color_match(px, RIVAL_COLOR_2, RIVAL_TOLERANCE):
         log.info("rival race detected")
-        ctx.cultivate_detail.turn_info.turn_operation = None
-        ctx.cultivate_detail.turn_info.parse_train_info_finish = False
+
+        # Check if there's a scheduled race and its grade
+        turn_op = getattr(ctx.cultivate_detail.turn_info, 'turn_operation', None)
+        from module.umamusume.define import TurnOperationType
+        has_scheduled_race = (turn_op is not None and
+                             getattr(turn_op, 'turn_operation_type', None) == TurnOperationType.TURN_OPERATION_TYPE_RACE)
+
+        if has_scheduled_race:
+            race_id = getattr(turn_op, 'race_id', 0)
+            from module.umamusume.asset.race_data import is_g1_race, is_g2_race, is_g3_race
+            is_g1 = is_g1_race(race_id)
+            is_g2 = is_g2_race(race_id)
+            is_g3 = is_g3_race(race_id)
+            is_high_grade = is_g1 or is_g2 or is_g3
+            is_year_end = is_late_dec_date(current_date)
+
+            if is_high_grade:
+                grade_name = "G1" if is_g1 else ("G2" if is_g2 else "G3")
+                log.info(f"{grade_name} rival race detected (race_id: {race_id})")
+
+                # Check energy level
+                from bot.conn.fetch import read_energy
+                energy = read_energy()
+                if energy == 0:
+                    time.sleep(0.15)
+                    energy = read_energy()
+
+                # Try energy recovery for G1/G2 when energy <= 0
+                if energy <= 0 and (is_g1 or is_g2):
+                    log.info(f"Energy <= 0 for {grade_name} rival race - attempting energy recovery")
+                    from module.umamusume.scenario.mant.inventory import handle_energy_drink_fallback
+                    if handle_energy_drink_fallback(ctx):
+                        time.sleep(0.5)
+                        energy = read_energy()
+                        if energy == 0:
+                            time.sleep(0.15)
+                            energy = read_energy()
+                        log.info(f"Energy after recovery: {energy}")
+
+                # Proceed with race if: Late Dec (year-end) OR energy > 5
+                if is_year_end or energy > 5:
+                    log.info(f"Proceeding with {grade_name} rival race (is_year_end: {is_year_end}, energy: {energy})")
+                    # Set flag to bypass 3 consecutive races warning
+                    ctx.cultivate_detail.turn_info.bypass_race_warning = True
+                    # Keep the turn_operation as-is, proceed to race
+                    ctx.cultivate_detail.turn_info.parse_train_info_finish = True
+                    ctx.cultivate_detail.turn_info.mant_rival_checked = True
+                    return
+                else:
+                    log.info(f"Insufficient energy for {grade_name} rival race (energy: {energy}, need > 5) - continuing with current operation")
+            else:
+                log.info(f"Non-G1/G2/G3 rival race (race_id: {race_id}) - continuing with current operation")
+        else:
+            log.info("Rival detected but no race scheduled - continuing with current operation")
+
+        # Don't clear turn_operation - let the bot continue with whatever was planned (training, rest, etc.)
     ctx.cultivate_detail.turn_info.mant_rival_checked = True
