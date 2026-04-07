@@ -376,48 +376,27 @@ def script_cultivate_event(ctx: UmamusumeContext):
         if idx > len(selectors):
             idx = len(selectors)
 
-        # Try to find a selector that hasn't been tried yet for this event
-        clicked = False
-        for try_idx in range(len(selectors)):
-            actual_idx = try_idx + 1  # 1-based
-            selector_key = f"{event_name_clean}_{actual_idx}"
-            if selector_key in ctx.cultivate_detail.event_tried_selectors:
-                continue
-
-            target_pt = selectors[actual_idx - 1]
-            log.info(f"Clicking option {actual_idx}/{len(selectors)} (source={choice_source})")
-            ctx.ctrl.click(int(target_pt[0]), int(target_pt[1]), f"Event option-{actual_idx}")
-            ctx.cultivate_detail.event_tried_selectors.add(selector_key)
-            clicked = True
-            break
-
-        # If all selectors tried, fall back to the originally chosen one
-        if not clicked:
-            target_pt = selectors[idx - 1]
-            log.info(f"Clicking option {idx}/{len(selectors)} (source={choice_source}, retry)")
-            ctx.ctrl.click(int(target_pt[0]), int(target_pt[1]), f"Event option-{idx} (retry)")
-            clicked = True
-
-        if clicked:
-            # Wait and verify click registered
-            time.sleep(1.5)
-            verify_img = ctx.ctrl.get_screen()
-            if verify_img is not None:
-                verify_gray = cv2.cvtColor(verify_img, cv2.COLOR_BGR2GRAY)
-                still_on_event = False
-                for tpl in EVENT_TEMPLATES:
-                    if image_match(verify_gray, tpl).find_match:
-                        still_on_event = True
-                        break
-                if still_on_event:
-                    log.warning(f"Event '{event_name_clean}' still visible after click - may need retry")
-                    # Don't mark as successfully clicked yet
-                    ctx.cultivate_detail.event_cooldown_until = time.time() + 2.0
-                    return
-                else:
-                    log.info(f"Event '{event_name_clean}' cleared after click")
-                    ctx.cultivate_detail.last_clicked_event_name = event_name_clean
-                    threading.Thread(target=detect_hint_after_event, args=(ctx.ctrl, event_name), daemon=True).start()
-            ctx.cultivate_detail.event_cooldown_until = time.time() + 3.0
-            ctx.cultivate_detail.last_clicked_event_name = event_name_clean
-            return
+        target_pt = selectors[idx - 1]
+        log.info(f"Clicking option {idx}/{len(selectors)} (source={choice_source}, retry)")
+        ctx.ctrl.click(int(target_pt[0]), int(target_pt[1]), f"Event option-{idx} (retry)")
+        # Wait and verify click registered
+        time.sleep(1.5)
+        verify_img = ctx.ctrl.get_screen()
+        if verify_img is not None:
+            verify_gray = cv2.cvtColor(verify_img, cv2.COLOR_BGR2GRAY)
+            still_on_event = False
+            for tpl in EVENT_TEMPLATES:
+                if image_match(verify_gray, tpl).find_match:
+                    still_on_event = True
+                    break
+            if still_on_event:
+                log.warning(f"Event '{event_name_clean}' still visible after click - may need retry")
+                # Don't mark as successfully clicked yet
+                ctx.cultivate_detail.event_cooldown_until = time.time() + 2.0
+                return
+            else:
+                log.info(f"Event '{event_name_clean}' cleared after click")
+                ctx.cultivate_detail.last_clicked_event_name = event_name_clean
+                threading.Thread(target=detect_hint_after_event, args=(ctx.ctrl, event_name), daemon=True).start()
+        ctx.cultivate_detail.event_cooldown_until = time.time() + 3.0
+        ctx.cultivate_detail.last_clicked_event_name = event_name_clean
