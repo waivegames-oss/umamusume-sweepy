@@ -149,14 +149,15 @@ def script_cultivate_race_list(ctx: UmamusumeContext):
     ura_match = image_match(img, REF_RACE_LIST_URA_RACE).find_match
     
     log.info(f"Template matching - Goal Race: {goal_match}, URA Race: {ura_match}")
+    race_id = getattr(turn_op, 'race_id', 0)
     
     if goal_match:
-        log.info("Found Goal Race - clicking to enter detail interface")
-        try_use_cleat(ctx, getattr(turn_op, 'race_id', 0))
+        log.info(f"Found Goal Race with ID: {race_id} - clicking to enter detail interface")
+        try_use_cleat(ctx, race_id, is_climax=(race_id == 0))
         ctx.ctrl.click_by_point(CULTIVATE_GOAL_RACE_INTER_1)
     elif ura_match:
-        log.info("Found URA Race - clicking to enter detail interface")
-        try_use_cleat(ctx, getattr(turn_op, 'race_id', 0))
+        log.info(f"Found URA Race with ID: {race_id} - clicking to enter detail interface")
+        try_use_cleat(ctx, race_id, is_climax=(race_id == 0)) # should never be a MANT race, but just in case
         ctx.ctrl.click_by_point(CULTIVATE_GOAL_RACE_INTER_1)
     else:
         if ctx.cultivate_detail.turn_info.turn_operation is None:
@@ -166,7 +167,6 @@ def script_cultivate_race_list(ctx: UmamusumeContext):
         else:
             log.info(f"Turn operation type: {ctx.cultivate_detail.turn_info.turn_operation.turn_operation_type}")
             if ctx.cultivate_detail.turn_info.turn_operation.turn_operation_type == TurnOperationType.TURN_OPERATION_TYPE_RACE:
-                race_id = ctx.cultivate_detail.turn_info.turn_operation.race_id
                 log.info(f"Race operation with ID: {race_id}")
                 if race_id in [2381, 2382, 2385, 2386, 2387] or race_id == 0:
                     log.info("Detected URA race operation - clicking race button directly")
